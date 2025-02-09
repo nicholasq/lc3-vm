@@ -177,6 +177,7 @@ impl Vm {
         match Opcode::from(opcode) {
             Opcode::Add => self.execute_add(instr),
             Opcode::Ldi => self.execute_ldi(instr),
+            Opcode::And => self.execute_and(instr),
             _ => panic!("Unsupported opcode: {}", opcode),
         }
     }
@@ -199,23 +200,32 @@ impl Vm {
     }
 
     fn execute_ldi(&mut self, instr: u16) {
-        // Bits 11-9: the destination register.
         let dest = (instr >> 9) & 0x7;
-
-        // Bits 8-0: the PCoffset. Sign extend it from 9 bits.
         let pc_offset = sign_extend(instr & 0x1FF, 9);
-
-        // Compute the effective address by adding the offset to the current PC.
         let addr = self.registers[Register::PC].wrapping_add(pc_offset);
-
-        // First memory read: get the location that contains the final address.
         let final_addr = self.memory[addr as usize];
 
-        // Second memory read: read the value from that final address.
         self.registers[dest as usize] = self.memory[final_addr as usize];
 
-        // Update the condition flags based on the loaded value.
         update_flags(&mut self.registers, dest);
+    }
+
+    fn execute_and(&mut self, instr: u16) {
+        let dest_reg = (instr >> 9) & 0x7;
+        let src_reg1 = (instr >> 6) & 0x7;
+        let imm_flag = (instr >> 5) & 1;
+
+        if imm_flag == 1 {
+            let imm5 = sign_extend(instr & 0x1F, 5);
+            self.registers[dest_reg as usize] = self.registers[src_reg1 as usize] & imm5;
+        } else {
+            let src_reg2 = instr & 0x7;
+            self.registers[dest_reg as usize] =
+                self.registers[src_reg1 as usize] & self.registers[src_reg2 as usize];
+        }
+
+        // Update the condition flags based on the result.
+        update_flags(&mut self.registers, dest_reg);
     }
 }
 
@@ -410,5 +420,77 @@ mod tests {
                 case.expected_flag as u16
             );
         }
+    }
+
+    #[test]
+    fn test_and_instruction() {
+        let mut vm = Vm::new();
+
+        // Test register-register AND
+        vm.registers[Register::R0 as usize] = 0xFF00;
+        vm.registers[Register::R1 as usize] = 0x0F0F;
+        vm.execute_instruction(0b0101_0100_0000_0001); // AND R2, R0, R1
+        assert_eq!(vm.registers[Register::R2 as usize], 0x0F00);
+        assert_eq!(
+            vm.registers[Register::Cond as usize],
+            ConditionFlag::Pos as u16
+        );
+
+        // Test register-immediate AND
+        vm.registers[Register::R0 as usize] = 0xFFFF;
+        vm.execute_instruction(0b0101_0110_0010_1111); // AND R3, R0, #15 (imm5 = 15)
+        assert_eq!(vm.registers[Register::R3 as usize], 15);
+        assert_eq!(
+            vm.registers[Register::Cond as usize],
+            ConditionFlag::Pos as u16
+        );
+
+        // Test zero result
+        vm.registers[Register::R0 as usize] = 0xFF00;
+        vm.registers[Register::R1 as usize] = 0x00FF;
+        vm.execute_instruction(0b0101_0100_0000_0001); // AND R2, R0, R1
+        assert_eq!(vm.registers[Register::R2 as usize], 0);
+        assert_eq!(
+            vm.registers[Register::Cond as usize],
+            ConditionFlag::Zro as u16
+        );
+
+        // Test negative result
+        vm.registers[Register::R0 as usize] = 0x8000;
+        vm.execute_instruction(0b0101_0110_0011_1111); // AND R3, R0, #-1
+        assert_eq!(vm.registers[Register::R3 as usize], 0x8000);
+        assert_eq!(
+            vm.registers[Register::Cond as usize],
+            ConditionFlag::Neg as u16
+        );
+
+        // Test with all bits set
+        vm.registers[Register::R0 as usize] = 0xFFFF;
+        vm.registers[Register::R1 as usize] = 0xFFFF;
+        vm.execute_instruction(0b0101_0100_0000_0001); // AND R2, R0, R1
+        assert_eq!(vm.registers[Register::R2 as usize], 0xFFFF);
+        assert_eq!(
+            vm.registers[Register::Cond as usize],
+            ConditionFlag::Neg as u16
+        );
+
+        // Test with no bits set
+        vm.registers[Register::R0 as usize] = 0;
+        vm.registers[Register::R1 as usize] = 0xFFFF;
+        vm.execute_instruction(0b0101_0100_0000_0001); // AND R2, R0, R1
+        assert_eq!(vm.registers[Register::R2 as usize], 0);
+        assert_eq!(
+            vm.registers[Register::Cond as usize],
+            ConditionFlag::Zro as u16
+        );
+
+        // Test immediate with sign extension
+        vm.registers[Register::R0 as usize] = 0xFFFF;
+        vm.execute_instruction(0b0101_0110_0011_0000); // AND R3, R0, #-16
+        assert_eq!(vm.registers[Register::R3 as usize], 0xFFF0);
+        assert_eq!(
+            vm.registers[Register::Cond as usize],
+            ConditionFlag::Neg as u16
+        );
     }
 }
