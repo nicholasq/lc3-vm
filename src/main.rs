@@ -178,6 +178,7 @@ impl Vm {
             Opcode::Add => self.execute_add(instr),
             Opcode::Ldi => self.execute_ldi(instr),
             Opcode::And => self.execute_and(instr),
+            Opcode::Not => self.execute_not(instr),
             _ => panic!("Unsupported opcode: {}", opcode),
         }
     }
@@ -225,6 +226,13 @@ impl Vm {
         }
 
         // Update the condition flags based on the result.
+        update_flags(&mut self.registers, dest_reg);
+    }
+
+    fn execute_not(&mut self, instr: u16) {
+        let dest_reg = (instr >> 9) & 0x7;
+        let src_reg = (instr >> 6) & 0x7;
+        self.registers[dest_reg as usize] = !self.registers[src_reg as usize];
         update_flags(&mut self.registers, dest_reg);
     }
 }
@@ -488,6 +496,47 @@ mod tests {
         vm.registers[Register::R0 as usize] = 0xFFFF;
         vm.execute_instruction(0b0101_0110_0011_0000); // AND R3, R0, #-16
         assert_eq!(vm.registers[Register::R3 as usize], 0xFFF0);
+        assert_eq!(
+            vm.registers[Register::Cond as usize],
+            ConditionFlag::Neg as u16
+        );
+    }
+
+    #[test]
+    fn test_not_instruction() {
+        let mut vm = Vm::new();
+
+        // Test NOT of all zeros
+        vm.registers[Register::R0 as usize] = 0x0000;
+        vm.execute_instruction(0b1001_0010_0011_1111); // NOT R1, R0
+        assert_eq!(vm.registers[Register::R1 as usize], 0xFFFF);
+        assert_eq!(
+            vm.registers[Register::Cond as usize],
+            ConditionFlag::Neg as u16
+        );
+
+        // Test NOT of all ones
+        vm.registers[Register::R2 as usize] = 0xFFFF;
+        vm.execute_instruction(0b1001_0110_0111_1111); // NOT R3, R2
+        assert_eq!(vm.registers[Register::R3 as usize], 0x0000);
+        assert_eq!(
+            vm.registers[Register::Cond as usize],
+            ConditionFlag::Zro as u16
+        );
+
+        // Test NOT of alternating bits (0101 -> 1010)
+        vm.registers[Register::R4 as usize] = 0x5555;
+        vm.execute_instruction(0b1001_1011_0011_1111); // NOT R5, R4
+        assert_eq!(vm.registers[Register::R5 as usize], 0xAAAA);
+        assert_eq!(
+            vm.registers[Register::Cond as usize],
+            ConditionFlag::Neg as u16
+        );
+
+        // Test NOT of positive number
+        vm.registers[Register::R0 as usize] = 0x7FFF;
+        vm.execute_instruction(0b1001_0010_0011_1111); // NOT R1, R0
+        assert_eq!(vm.registers[Register::R1 as usize], 0x8000);
         assert_eq!(
             vm.registers[Register::Cond as usize],
             ConditionFlag::Neg as u16
