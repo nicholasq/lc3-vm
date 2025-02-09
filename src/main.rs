@@ -4,27 +4,28 @@ use std::ops::{Index, IndexMut};
 /// - 8 general purpose registers (R0-R7)
 /// - 1 program counter (PC) register
 /// - 1 condition flags (COND) register
+#[derive(Copy, Clone)]
 enum Register {
     /// General purpose register 0
     R0 = 0,
     /// General purpose register 1
-    R1,
+    R1 = 1,
     /// General purpose register 2
-    R2,
+    R2 = 2,
     /// General purpose register 3
-    R3,
+    R3 = 3,
     /// General purpose register 4
-    R4,
+    R4 = 4,
     /// General purpose register 5
-    R5,
+    R5 = 5,
     /// General purpose register 6
-    R6,
+    R6 = 6,
     /// General purpose register 7 (Some architectures use this as Stack Pointer)
-    R7,
+    R7 = 7,
     /// Program Counter: Contains the address of the next instruction to be executed
-    PC,
+    PC = 8,
     /// Condition Flags: Stores the status of the most recent ALU operation (Negative, Zero, or Positive)
-    Cond,
+    Cond = 9,
 }
 
 const REGISTER_COUNT: usize = 10;
@@ -44,6 +45,7 @@ impl IndexMut<Register> for [u16] {
 
 /// The LC-3 instruction set consists of 16 opcodes.
 /// Each instruction is 16 bits long with the first 4 bits containing the opcode.
+#[derive(Clone, Copy)]
 enum Opcode {
     /// Branch: Conditional branch based on condition flags
     /// Format: BR[n][z][p] PCoffset9
@@ -118,6 +120,7 @@ impl From<u16> for Opcode {
 }
 
 /// Condition Flags indicate the status of the most recent ALU operation:
+#[derive(Clone, Copy)]
 enum ConditionFlag {
     /// - Pos: Indicates the result was positive
     Pos = 1 << 0,
@@ -164,8 +167,8 @@ impl Vm {
                 break;
             }
             let instr: u16 = self.memory[self.registers[Register::PC] as usize];
-            self.execute_instruction(instr);
             self.registers[Register::PC] += 1;
+            self.execute_instruction(instr);
         }
     }
 
@@ -173,6 +176,7 @@ impl Vm {
         let opcode = (instr >> 12) & 0xF;
         match Opcode::from(opcode) {
             Opcode::Add => self.execute_add(instr),
+            Opcode::Ldi => self.execute_ldi(instr),
             _ => panic!("Unsupported opcode: {}", opcode),
         }
     }
@@ -192,6 +196,26 @@ impl Vm {
                 self.registers[src_reg1 as usize].wrapping_add(self.registers[src_reg2 as usize]);
         }
         update_flags(&mut self.registers, dest_reg);
+    }
+
+    fn execute_ldi(&mut self, instr: u16) {
+        // Bits 11-9: the destination register.
+        let dest = (instr >> 9) & 0x7;
+
+        // Bits 8-0: the PCoffset. Sign extend it from 9 bits.
+        let pc_offset = sign_extend(instr & 0x1FF, 9);
+
+        // Compute the effective address by adding the offset to the current PC.
+        let addr = self.registers[Register::PC].wrapping_add(pc_offset);
+
+        // First memory read: get the location that contains the final address.
+        let final_addr = self.memory[addr as usize];
+
+        // Second memory read: read the value from that final address.
+        self.registers[dest as usize] = self.memory[final_addr as usize];
+
+        // Update the condition flags based on the loaded value.
+        update_flags(&mut self.registers, dest);
     }
 }
 
@@ -295,5 +319,96 @@ mod tests {
             vm.registers[Register::Cond as usize],
             ConditionFlag::Neg as u16
         ); // Check flag
+    }
+
+    #[derive(Copy, Clone)]
+    struct LdiTestCase {
+        pc: u16,
+        offset: u16,
+        intermediate_addr: u16,
+        final_value: u16,
+        expected_reg: Register,
+        expected_value: u16,
+        expected_flag: ConditionFlag,
+    }
+
+    #[test]
+    fn test_ldi_instruction() {
+        let test_cases = vec![
+            LdiTestCase {
+                pc: 0x3000,
+                offset: 5,
+                intermediate_addr: 0x4000,
+                final_value: 42,
+                expected_reg: Register::R1,
+                expected_value: 42,
+                expected_flag: ConditionFlag::Pos,
+            },
+            LdiTestCase {
+                pc: 0x3005,
+                offset: 0x1FD, // -3 in 9-bit two's complement
+                intermediate_addr: 0x5000,
+                final_value: 0,
+                expected_reg: Register::R2,
+                expected_value: 0,
+                expected_flag: ConditionFlag::Zro,
+            },
+            LdiTestCase {
+                pc: 0x3000,
+                offset: 1,
+                intermediate_addr: 0x4000,
+                final_value: 0x8000,
+                expected_reg: Register::R3,
+                expected_value: 0x8000,
+                expected_flag: ConditionFlag::Neg,
+            },
+            LdiTestCase {
+                pc: 0x3000,
+                offset: 0,
+                intermediate_addr: 0x4000,
+                final_value: 100,
+                expected_reg: Register::R4,
+                expected_value: 100,
+                expected_flag: ConditionFlag::Pos,
+            },
+            LdiTestCase {
+                pc: 0x0100,
+                offset: 0x00FF, // 255 in 9-bit
+                intermediate_addr: 0x0200,
+                final_value: 777,
+                expected_reg: Register::R5,
+                expected_value: 777,
+                expected_flag: ConditionFlag::Pos,
+            },
+            LdiTestCase {
+                pc: 0x3000,
+                offset: 0x180, // -128 in 9-bit two's complement
+                intermediate_addr: 0x4000,
+                final_value: 200,
+                expected_reg: Register::R6,
+                expected_value: 200,
+                expected_flag: ConditionFlag::Pos,
+            },
+        ];
+
+        for case in test_cases {
+            let mut vm = Vm::new();
+            vm.registers[Register::PC] = case.pc;
+            let instruction: u16 = (0b1010 << 12) | ((case.expected_reg as u16) << 9) | case.offset;
+            let addr = case.pc.wrapping_add(sign_extend(case.offset, 9));
+            vm.memory[addr as usize] = case.intermediate_addr;
+            vm.memory[case.intermediate_addr as usize] = case.final_value;
+
+            vm.execute_instruction(instruction);
+
+            assert_eq!(
+                vm.registers[case.expected_reg as usize],
+                case.expected_value
+            );
+            assert_eq!(
+                vm.registers[Register::Cond as usize],
+                case.expected_flag as u16
+            );
+        }
     }
 }
