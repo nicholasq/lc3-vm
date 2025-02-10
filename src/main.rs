@@ -179,6 +179,7 @@ impl Vm {
             Opcode::Ldi => self.execute_ldi(instr),
             Opcode::And => self.execute_and(instr),
             Opcode::Not => self.execute_not(instr),
+            Opcode::Br => self.execute_branch(instr),
             _ => panic!("Unsupported opcode: {}", opcode),
         }
     }
@@ -234,6 +235,17 @@ impl Vm {
         let src_reg = (instr >> 6) & 0x7;
         self.registers[dest_reg as usize] = !self.registers[src_reg as usize];
         update_flags(&mut self.registers, dest_reg);
+    }
+
+    fn execute_branch(&mut self, instr: u16) {
+        let pc_offset = sign_extend(instr & 0x1FF, 9);
+        let nzp_flags = (instr >> 9) & 0x7;
+
+        // The branch is taken if any of the set flags (nzp_flags) match with the current
+        // condition flags in the Cond register (bitwise AND > 0)
+        if nzp_flags & self.registers[Register::Cond] > 0 {
+            self.registers[Register::PC] = self.registers[Register::PC].wrapping_add(pc_offset);
+        }
     }
 }
 
@@ -339,19 +351,19 @@ mod tests {
         ); // Check flag
     }
 
-    #[derive(Copy, Clone)]
-    struct LdiTestCase {
-        pc: u16,
-        offset: u16,
-        intermediate_addr: u16,
-        final_value: u16,
-        expected_reg: Register,
-        expected_value: u16,
-        expected_flag: ConditionFlag,
-    }
-
     #[test]
     fn test_ldi_instruction() {
+        #[derive(Copy, Clone)]
+        struct LdiTestCase {
+            pc: u16,
+            offset: u16,
+            intermediate_addr: u16,
+            final_value: u16,
+            expected_reg: Register,
+            expected_value: u16,
+            expected_flag: ConditionFlag,
+        }
+
         let test_cases = vec![
             LdiTestCase {
                 pc: 0x3000,
@@ -541,5 +553,69 @@ mod tests {
             vm.registers[Register::Cond as usize],
             ConditionFlag::Neg as u16
         );
+    }
+
+    #[test]
+    fn test_execute_branch() {
+        struct TestCase {
+            initial_pc: u16,
+            initial_cond: u16,
+            branch_cond: u16,
+            offset: i16, // signed offset
+            expected_pc: u16,
+        }
+        let test_cases = vec![
+            // Branch taken: positive offset.
+            TestCase {
+                initial_pc: 0x3000,
+                initial_cond: ConditionFlag::Zro as u16,
+                branch_cond: ConditionFlag::Zro as u16,
+                offset: 5,
+                expected_pc: 0x3000u16.wrapping_add(5),
+            },
+            // Branch not taken: flag mismatch.
+            TestCase {
+                initial_pc: 0x3000,
+                initial_cond: ConditionFlag::Pos as u16,
+                branch_cond: ConditionFlag::Zro as u16,
+                offset: 10,
+                expected_pc: 0x3000,
+            },
+            // Branch taken: negative offset.
+            TestCase {
+                initial_pc: 0x3005,
+                initial_cond: ConditionFlag::Neg as u16,
+                branch_cond: ConditionFlag::Neg as u16,
+                offset: -3,
+                expected_pc: 0x3005u16.wrapping_add((-3i16) as u16),
+            },
+            // Edge case: zero offset with matching flag.
+            TestCase {
+                initial_pc: 0x4000,
+                initial_cond: (ConditionFlag::Pos as u16)
+                    | (ConditionFlag::Neg as u16)
+                    | (ConditionFlag::Zro as u16),
+                branch_cond: 0b111,
+                offset: 0,
+                expected_pc: 0x4000,
+            },
+        ];
+        for tc in test_cases {
+            let mut vm = Vm::new();
+            vm.registers[Register::PC] = tc.initial_pc;
+            vm.registers[Register::Cond] = tc.initial_cond;
+            // Encode the offset as 9-bit two's complement.
+            let offset_encoded = (tc.offset as u16) & 0x1FF;
+            // Construct branch instruction:
+            // Bits 15-12: opcode (BR, 0) ; Bits 11-9: branch condition ; Bits 8-0: offset.
+            let instr = (0 << 12) | ((tc.branch_cond & 0x7) << 9) | offset_encoded;
+            vm.execute_branch(instr);
+            assert_eq!(
+                    vm.registers[Register::PC],
+                    tc.expected_pc,
+                    "Failure for test case: initial_pc=0x{:04X}, initial_cond=0x{:X}, branch_cond=0x{:X}, offset={}",
+                    tc.initial_pc, tc.initial_cond, tc.branch_cond, tc.offset
+                );
+        }
     }
 }
