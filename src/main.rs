@@ -180,6 +180,7 @@ impl Vm {
             Opcode::And => self.execute_and(instr),
             Opcode::Not => self.execute_not(instr),
             Opcode::Br => self.execute_branch(instr),
+            Opcode::Jmp => self.execute_jmp(instr),
             _ => panic!("Unsupported opcode: {}", opcode),
         }
     }
@@ -246,6 +247,11 @@ impl Vm {
         if nzp_flags & self.registers[Register::Cond] > 0 {
             self.registers[Register::PC] = self.registers[Register::PC].wrapping_add(pc_offset);
         }
+    }
+
+    fn execute_jmp(&mut self, instr: u16) {
+        let base_reg = (instr >> 6) & 0x7;
+        self.registers[Register::PC] = self.registers[base_reg as usize];
     }
 }
 
@@ -616,6 +622,92 @@ mod tests {
                     "Failure for test case: initial_pc=0x{:04X}, initial_cond=0x{:X}, branch_cond=0x{:X}, offset={}",
                     tc.initial_pc, tc.initial_cond, tc.branch_cond, tc.offset
                 );
+        }
+    }
+
+    #[test]
+    fn test_execute_jmp() {
+        struct TestCase {
+            name: &'static str,
+            base_reg: Register,
+            base_reg_value: u16,
+            initial_pc: u16,
+            expected_pc: u16,
+        }
+
+        let test_cases = vec![
+            // Basic jump forward
+            TestCase {
+                name: "Basic jump forward",
+                base_reg: Register::R2,
+                base_reg_value: 0x3100,
+                initial_pc: 0x3000,
+                expected_pc: 0x3100,
+            },
+            // Jump backward
+            TestCase {
+                name: "Jump backward",
+                base_reg: Register::R3,
+                base_reg_value: 0x2F00,
+                initial_pc: 0x3000,
+                expected_pc: 0x2F00,
+            },
+            // RET case (using R7)
+            TestCase {
+                name: "RET case using R7",
+                base_reg: Register::R7,
+                base_reg_value: 0x3010,
+                initial_pc: 0x3000,
+                expected_pc: 0x3010,
+            },
+            // Jump to current PC location
+            TestCase {
+                name: "Jump to current PC",
+                base_reg: Register::R4,
+                base_reg_value: 0x3000,
+                initial_pc: 0x3000,
+                expected_pc: 0x3000,
+            },
+            // Jump to maximum address
+            TestCase {
+                name: "Jump to max address",
+                base_reg: Register::R1,
+                base_reg_value: 0xFFFF,
+                initial_pc: 0x3000,
+                expected_pc: 0xFFFF,
+            },
+            // Jump to start of memory
+            TestCase {
+                name: "Jump to start of memory",
+                base_reg: Register::R5,
+                base_reg_value: 0x0000,
+                initial_pc: 0x3000,
+                expected_pc: 0x0000,
+            },
+        ];
+
+        for tc in test_cases {
+            let mut vm = Vm::new();
+
+            // Setup initial state
+            vm.registers[Register::PC] = tc.initial_pc;
+            vm.registers[tc.base_reg as usize] = tc.base_reg_value;
+
+            // Construct JMP instruction
+            // Format: 1100 000 BaseR 000000
+            let instr: u16 = (0b1100 << 12) | ((tc.base_reg as u16 & 0x7) << 6);
+
+            // Execute the jump
+            vm.execute_jmp(instr);
+
+            assert_eq!(
+                vm.registers[Register::PC],
+                tc.expected_pc,
+                "Failed test case: {}. Expected PC=0x{:04X}, got PC=0x{:04X}",
+                tc.name,
+                tc.expected_pc,
+                vm.registers[Register::PC]
+            );
         }
     }
 }
