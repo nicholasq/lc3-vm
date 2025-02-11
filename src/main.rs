@@ -120,7 +120,7 @@ impl From<u16> for Opcode {
 }
 
 /// Condition Flags indicate the status of the most recent ALU operation:
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum ConditionFlag {
     /// - Pos: Indicates the result was positive
     Pos = 1 << 0,
@@ -182,6 +182,9 @@ impl Vm {
             Opcode::Br => self.execute_branch(instr),
             Opcode::Jmp => self.execute_jmp(instr),
             Opcode::Jsr => self.execute_jsr(instr),
+            Opcode::Ld => self.execute_load(instr),
+            Opcode::Ldr => self.execute_load_reg(instr),
+            Opcode::Lea => self.execute_load_eff_addr(instr),
             _ => panic!("Unsupported opcode: {}", opcode),
         }
     }
@@ -270,6 +273,46 @@ impl Vm {
             let base_reg = (instr >> 6) & 0x7;
             self.registers[Register::PC] = self.registers[base_reg as usize];
         }
+    }
+
+    fn execute_load(&mut self, instr: u16) {
+        let dest_reg = (instr >> 9) & 0x7;
+        let pc_offset = sign_extend(instr & 0x1FF, 9);
+
+        // Calculate memory address by adding offset to current PC
+        let addr = self.registers[Register::PC].wrapping_add(pc_offset);
+
+        // Load value from memory into destination register
+        self.registers[dest_reg as usize] = self.memory[addr as usize];
+
+        // Update condition flags based on loaded value
+        update_flags(&mut self.registers, dest_reg);
+    }
+
+    fn execute_load_reg(&mut self, instr: u16) {
+        let dest_reg = (instr >> 9) & 0x7;
+        let base_reg = (instr >> 6) & 0x7;
+        let offset = sign_extend(instr & 0x3F, 6);
+
+        // Calculate memory address by adding offset to base register value
+        let addr = self.registers[base_reg as usize].wrapping_add(offset);
+
+        // Load value from memory into destination register
+        self.registers[dest_reg as usize] = self.memory[addr as usize];
+
+        // Update condition flags based on loaded value
+        update_flags(&mut self.registers, dest_reg);
+    }
+
+    fn execute_load_eff_addr(&mut self, instr: u16) {
+        let dest_reg = (instr >> 9) & 0x7;
+        let pc_offset = sign_extend(instr & 0x1FF, 9);
+
+        // Calculate effective address by adding offset to current PC
+        self.registers[dest_reg as usize] = self.registers[Register::PC].wrapping_add(pc_offset);
+
+        // Update condition flags based on calculated address
+        update_flags(&mut self.registers, dest_reg);
     }
 }
 
@@ -840,6 +883,362 @@ mod tests {
                 tc.name,
                 tc.expected_r7,
                 vm.registers[Register::R7]
+            );
+        }
+    }
+
+    #[test]
+    fn test_execute_load() {
+        struct TestCase {
+            name: &'static str,
+            initial_pc: u16,
+            dest_reg: Register,
+            offset: i16,
+            memory_value: u16,
+            expected_value: u16,
+            expected_flag: ConditionFlag,
+        }
+
+        let test_cases = vec![
+            // Basic positive offset load
+            TestCase {
+                name: "Load positive value with positive offset",
+                initial_pc: 0x3000,
+                dest_reg: Register::R1,
+                offset: 5,
+                memory_value: 42,
+                expected_value: 42,
+                expected_flag: ConditionFlag::Pos,
+            },
+            // Zero value load
+            TestCase {
+                name: "Load zero value",
+                initial_pc: 0x3000,
+                dest_reg: Register::R2,
+                offset: 0,
+                memory_value: 0,
+                expected_value: 0,
+                expected_flag: ConditionFlag::Zro,
+            },
+            // Negative value load
+            TestCase {
+                name: "Load negative value",
+                initial_pc: 0x3000,
+                dest_reg: Register::R3,
+                offset: 1,
+                memory_value: 0x8000,
+                expected_value: 0x8000,
+                expected_flag: ConditionFlag::Neg,
+            },
+            // Maximum positive offset
+            TestCase {
+                name: "Load with maximum positive offset",
+                initial_pc: 0x3000,
+                dest_reg: Register::R4,
+                offset: 0xFF, // Maximum positive 9-bit offset
+                memory_value: 100,
+                expected_value: 100,
+                expected_flag: ConditionFlag::Pos,
+            },
+            // Maximum negative offset
+            TestCase {
+                name: "Load with maximum negative offset",
+                initial_pc: 0x3000,
+                dest_reg: Register::R5,
+                offset: -256, // Maximum negative 9-bit offset
+                memory_value: 50,
+                expected_value: 50,
+                expected_flag: ConditionFlag::Pos,
+            },
+            // Wrap around memory
+            TestCase {
+                name: "Load with memory address wrap-around",
+                initial_pc: 0xFFFF,
+                dest_reg: Register::R6,
+                offset: 5,
+                memory_value: 0x4444,
+                expected_value: 0x4444,
+                expected_flag: ConditionFlag::Pos,
+            },
+            // Edge case: maximum unsigned 16-bit value
+            TestCase {
+                name: "Load maximum unsigned value",
+                initial_pc: 0x3000,
+                dest_reg: Register::R7,
+                offset: 10,
+                memory_value: 0xFFFF,
+                expected_value: 0xFFFF,
+                expected_flag: ConditionFlag::Neg,
+            },
+        ];
+
+        for tc in test_cases {
+            let mut vm = Vm::new();
+
+            // Setup initial state
+            vm.registers[Register::PC] = tc.initial_pc;
+
+            // Setup memory value at target address
+            let target_addr = tc.initial_pc.wrapping_add(tc.offset as u16);
+            vm.memory[target_addr as usize] = tc.memory_value;
+
+            // Construct LD instruction
+            // Format: 0010 DR PCoffset9
+            let instruction =
+                (0b0010 << 12) | ((tc.dest_reg as u16 & 0x7) << 9) | (tc.offset as u16 & 0x1FF);
+
+            // Execute the load
+            vm.execute_load(instruction);
+
+            // Verify loaded value
+            assert_eq!(
+                vm.registers[tc.dest_reg as usize], tc.expected_value,
+                "Failed test case '{}': Register value mismatch",
+                tc.name
+            );
+
+            // Verify condition flag
+            assert_eq!(
+                vm.registers[Register::Cond],
+                tc.expected_flag as u16,
+                "Failed test case '{}': Condition flag mismatch",
+                tc.name
+            );
+        }
+    }
+
+    #[test]
+    fn test_execute_load_reg() {
+        struct TestCase {
+            name: &'static str,
+            dest_reg: Register,
+            base_reg: Register,
+            base_value: u16,
+            offset: i8, // 6-bit signed offset
+            memory_value: u16,
+            expected_value: u16,
+            expected_flag: ConditionFlag,
+        }
+
+        let test_cases = vec![
+            // Basic positive offset load
+            TestCase {
+                name: "Load with positive offset",
+                dest_reg: Register::R1,
+                base_reg: Register::R2,
+                base_value: 0x3000,
+                offset: 5,
+                memory_value: 42,
+                expected_value: 42,
+                expected_flag: ConditionFlag::Pos,
+            },
+            // Negative offset load
+            TestCase {
+                name: "Load with negative offset",
+                dest_reg: Register::R3,
+                base_reg: Register::R4,
+                base_value: 0x3100,
+                offset: -5,
+                memory_value: 0x8000,
+                expected_value: 0x8000,
+                expected_flag: ConditionFlag::Neg,
+            },
+            // Zero offset load
+            TestCase {
+                name: "Load with zero offset",
+                dest_reg: Register::R5,
+                base_reg: Register::R6,
+                base_value: 0x3200,
+                offset: 0,
+                memory_value: 0,
+                expected_value: 0,
+                expected_flag: ConditionFlag::Zro,
+            },
+            // Maximum positive offset (31)
+            TestCase {
+                name: "Load with maximum positive offset",
+                dest_reg: Register::R0,
+                base_reg: Register::R1,
+                base_value: 0x3000,
+                offset: 31,
+                memory_value: 100,
+                expected_value: 100,
+                expected_flag: ConditionFlag::Pos,
+            },
+            // Maximum negative offset (-32)
+            TestCase {
+                name: "Load with maximum negative offset",
+                dest_reg: Register::R2,
+                base_reg: Register::R3,
+                base_value: 0x3300,
+                offset: -32,
+                memory_value: 50,
+                expected_value: 50,
+                expected_flag: ConditionFlag::Pos,
+            },
+            // Memory address wrap-around
+            TestCase {
+                name: "Load with address wrap-around",
+                dest_reg: Register::R4,
+                base_reg: Register::R5,
+                base_value: 0xFFFF,
+                offset: 5,
+                memory_value: 0x4444,
+                expected_value: 0x4444,
+                expected_flag: ConditionFlag::Pos,
+            },
+            // Same register for base and destination
+            TestCase {
+                name: "Load using same register for base and destination",
+                dest_reg: Register::R6,
+                base_reg: Register::R6,
+                base_value: 0x3400,
+                offset: 10,
+                memory_value: 0x2000,
+                expected_value: 0x2000,
+                expected_flag: ConditionFlag::Pos,
+            },
+            // Edge case with maximum unsigned value
+            TestCase {
+                name: "Load maximum unsigned value",
+                dest_reg: Register::R7,
+                base_reg: Register::R0,
+                base_value: 0x3500,
+                offset: 15,
+                memory_value: 0xFFFF,
+                expected_value: 0xFFFF,
+                expected_flag: ConditionFlag::Neg,
+            },
+        ];
+
+        for tc in test_cases {
+            let mut vm = Vm::new();
+
+            // Setup base register value
+            vm.registers[tc.base_reg as usize] = tc.base_value;
+
+            // Setup memory value at target address
+            let target_addr = tc.base_value.wrapping_add(tc.offset as u16);
+            vm.memory[target_addr as usize] = tc.memory_value;
+
+            // Construct LDR instruction
+            // Format: 0110 DR BaseR offset6
+            let instruction = (0b0110 << 12)
+                | ((tc.dest_reg as u16 & 0x7) << 9)
+                | ((tc.base_reg as u16 & 0x7) << 6)
+                | (tc.offset as u16 & 0x3F);
+
+            // Execute the load register instruction
+            vm.execute_load_reg(instruction);
+
+            // Verify loaded value
+            assert_eq!(
+                vm.registers[tc.dest_reg as usize], tc.expected_value,
+                "Failed test case '{}': Register value mismatch",
+                tc.name
+            );
+
+            // Verify condition flag
+            assert_eq!(
+                vm.registers[Register::Cond],
+                tc.expected_flag as u16,
+                "Failed test case '{}': Condition flag mismatch",
+                tc.name
+            );
+        }
+    }
+
+    #[test]
+    fn test_execute_load_eff_addr() {
+        struct TestCase {
+            name: &'static str,
+            initial_pc: u16,
+            dest_reg: Register,
+            offset: i16,
+            expected_addr: u16,
+            expected_flag: ConditionFlag,
+        }
+
+        let test_cases = vec![
+            // Basic positive offset
+            TestCase {
+                name: "Positive offset calculation",
+                initial_pc: 0x3000,
+                dest_reg: Register::R1,
+                offset: 0x80,
+                expected_addr: 0x3080,
+                expected_flag: ConditionFlag::Pos,
+            },
+            // Zero offset
+            TestCase {
+                name: "Zero offset calculation",
+                initial_pc: 0x3000,
+                dest_reg: Register::R2,
+                offset: 0,
+                expected_addr: 0x3000,
+                expected_flag: ConditionFlag::Pos,
+            },
+            // Negative offset
+            TestCase {
+                name: "Negative offset calculation",
+                initial_pc: 0x3000,
+                dest_reg: Register::R3,
+                offset: -256,
+                expected_addr: 0x2F00,
+                expected_flag: ConditionFlag::Pos,
+            },
+            // Wrap around to zero
+            TestCase {
+                name: "Address wrap to zero",
+                initial_pc: 0xFFFF,
+                dest_reg: Register::R6,
+                offset: 1,
+                expected_addr: 0x0000,
+                expected_flag: ConditionFlag::Zro,
+            },
+            // Wrap around to negative value
+            TestCase {
+                name: "Address wrap to negative value",
+                initial_pc: 0x7FFF,
+                dest_reg: Register::R7,
+                offset: 1,
+                expected_addr: 0x8000,
+                expected_flag: ConditionFlag::Neg,
+            },
+        ];
+
+        for tc in test_cases {
+            let mut vm = Vm::new();
+
+            // Setup initial state
+            vm.registers[Register::PC] = tc.initial_pc;
+
+            // Construct LEA instruction
+            // Format: 1110 DR PCoffset9
+            let instruction =
+                (0b1110 << 12) | ((tc.dest_reg as u16 & 0x7) << 9) | (tc.offset as u16 & 0x1FF);
+
+            // Execute the LEA instruction
+            vm.execute_load_eff_addr(instruction);
+
+            // Verify calculated address
+            assert_eq!(
+                vm.registers[tc.dest_reg as usize],
+                tc.expected_addr,
+                "Failed test case '{}': Address calculation mismatch. Expected 0x{:04X}, got 0x{:04X}",
+                tc.name,
+                tc.expected_addr,
+                vm.registers[tc.dest_reg as usize]
+            );
+
+            // Verify condition flag
+            assert_eq!(
+                vm.registers[Register::Cond],
+                tc.expected_flag as u16,
+                "Failed test case '{}': Condition flag mismatch. Expected {:?}, got flag 0x{:04X}",
+                tc.name,
+                tc.expected_flag,
+                vm.registers[Register::Cond]
             );
         }
     }
