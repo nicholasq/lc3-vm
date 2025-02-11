@@ -185,6 +185,9 @@ impl Vm {
             Opcode::Ld => self.execute_load(instr),
             Opcode::Ldr => self.execute_load_reg(instr),
             Opcode::Lea => self.execute_load_eff_addr(instr),
+            Opcode::St => self.execute_store(instr),
+            Opcode::Sti => self.execute_sti(instr),
+            Opcode::Str => self.execute_str_reg(instr),
             _ => panic!("Unsupported opcode: {}", opcode),
         }
     }
@@ -313,6 +316,39 @@ impl Vm {
 
         // Update condition flags based on calculated address
         update_flags(&mut self.registers, dest_reg);
+    }
+
+    fn execute_store(&mut self, instr: u16) {
+        // Extract source register from instruction bits [11:9]
+        let src_reg = (instr >> 9) & 0x7;
+        // Sign-extend the 9-bit PCoffset from bits [8:0]
+        let pc_offset = sign_extend(instr & 0x1FF, 9);
+        // Use the current PC (which is already incremented) to compute the target address
+        let addr = self.registers[Register::PC].wrapping_add(pc_offset);
+        // Store the value from the source register into memory
+        self.memory[addr as usize] = self.registers[src_reg as usize];
+    }
+
+    fn execute_sti(&mut self, instr: u16) {
+        // Extract source register (SR) where the value to store is located.
+        let src_reg = (instr >> 9) & 0x7;
+        // Extract and sign extend a 9-bit PC offset.
+        let pc_offset = sign_extend(instr & 0x1FF, 9);
+        // Compute the intermediate address: (incremented) PC plus the offset.
+        // Note: In our design the PC is already incremented after fetching.
+        let intermediate_addr = self.registers[Register::PC].wrapping_add(pc_offset);
+        // Look up the final target address stored in memory at that location.
+        let final_addr = self.memory[intermediate_addr as usize];
+        // Store the contents of the source register into memory at final_addr.
+        self.memory[final_addr as usize] = self.registers[src_reg as usize];
+    }
+
+    fn execute_str_reg(&mut self, instr: u16) {
+        let sr = (instr >> 9) & 0x7; // Source register whose content to store.
+        let base_r = (instr >> 6) & 0x7; // Register holding base address.
+        let offset6 = sign_extend(instr & 0x3F, 6); // Sign-extend the 6-bit offset.
+        let addr = self.registers[base_r as usize].wrapping_add(offset6);
+        self.memory[addr as usize] = self.registers[sr as usize];
     }
 }
 
@@ -1239,6 +1275,287 @@ mod tests {
                 tc.name,
                 tc.expected_flag,
                 vm.registers[Register::Cond]
+            );
+        }
+    }
+
+    #[test]
+    fn test_execute_store() {
+        // Define a struct to hold various test parameters.
+        struct TestCase {
+            name: &'static str,
+            initial_pc: u16,
+            src_reg: Register,
+            offset: i16,
+            register_value: u16, // value that will be stored
+            expected_memory_value: u16,
+        }
+
+        let test_cases = vec![
+            // Basic test: store a positive value.
+            TestCase {
+                name: "Store positive value",
+                initial_pc: 0x3000,
+                src_reg: Register::R1,
+                offset: 5,
+                register_value: 42,
+                expected_memory_value: 42,
+            },
+            // Test storing a zero value.
+            TestCase {
+                name: "Store zero value",
+                initial_pc: 0x3000,
+                src_reg: Register::R2,
+                offset: 0,
+                register_value: 0,
+                expected_memory_value: 0,
+            },
+            // Test storing a negative value (using two's complement).
+            TestCase {
+                name: "Store negative value",
+                initial_pc: 0x3000,
+                src_reg: Register::R3,
+                offset: 1,
+                register_value: 0x8000, // negative as seen in LC-3
+                expected_memory_value: 0x8000,
+            },
+            // Test with maximum positive offset.
+            TestCase {
+                name: "Store with maximum positive offset",
+                initial_pc: 0x3000,
+                src_reg: Register::R4,
+                offset: 0xFF, // maximum positive 9-bit offset
+                register_value: 100,
+                expected_memory_value: 100,
+            },
+            // Test with maximum negative offset.
+            TestCase {
+                name: "Store with maximum negative offset",
+                initial_pc: 0x3000,
+                src_reg: Register::R5,
+                offset: -256, // maximum negative 9-bit offset when sign-extended
+                register_value: 55,
+                expected_memory_value: 55,
+            },
+            // Test wrap-around of memory addresses.
+            TestCase {
+                name: "Store with wrap-around memory address",
+                initial_pc: 0xFFFF,
+                src_reg: Register::R6,
+                offset: 5,
+                register_value: 0x4444,
+                expected_memory_value: 0x4444,
+            },
+            // Edge case: Store maximum unsigned 16-bit value.
+            TestCase {
+                name: "Store maximum unsigned value",
+                initial_pc: 0x3000,
+                src_reg: Register::R7,
+                offset: 10,
+                register_value: 0xFFFF,
+                expected_memory_value: 0xFFFF,
+            },
+        ];
+
+        for tc in test_cases {
+            let mut vm = Vm::new();
+            // Set the initial PC and configure the register that will supply the stored value.
+            vm.registers[Register::PC] = tc.initial_pc;
+            vm.registers[tc.src_reg as usize] = tc.register_value;
+
+            // Build the instruction in the format:
+            // Bits [15:12]: opcode (ST = 0011)
+            // Bits [11:9]: source register (SR)
+            // Bits [8:0]: PCoffset9
+            let instruction: u16 =
+                (0b0011 << 12) | ((tc.src_reg as u16 & 0x7) << 9) | ((tc.offset as u16) & 0x1FF);
+
+            // Execute the store instruction.
+            vm.execute_store(instruction);
+
+            // Compute where the store should occur.
+            let expected_addr = tc.initial_pc.wrapping_add(sign_extend(tc.offset as u16, 9));
+            // Verify that the correct memory location now holds the expected value.
+            assert_eq!(
+                vm.memory[expected_addr as usize], tc.expected_memory_value,
+                "Failed test case '{}': memory[0x{:04X}] expected 0x{:04X} but found 0x{:04X}",
+                tc.name, expected_addr, tc.expected_memory_value, vm.memory[expected_addr as usize]
+            );
+        }
+    }
+
+    #[test]
+    fn test_execute_sti() {
+        struct TestCase {
+            name: &'static str,
+            initial_pc: u16,
+            src_reg: Register,
+            offset: i16,
+            src_value: u16,
+            intermediate_memory_value: u16,
+            // The final memory location, which gets set to src_value.
+            expected_final_memory_value: u16,
+        }
+
+        let test_cases = vec![
+            // Basic test: Positive offset.
+            TestCase {
+                name: "STI basic positive offset",
+                initial_pc: 0x3000,
+                src_reg: Register::R0,
+                offset: 5,
+                src_value: 123,
+                intermediate_memory_value: 0x4000,
+                expected_final_memory_value: 123,
+            },
+            // Test with zero offset.
+            TestCase {
+                name: "STI zero offset",
+                initial_pc: 0x3000,
+                src_reg: Register::R1,
+                offset: 0,
+                src_value: 0xABCD,
+                intermediate_memory_value: 0x5000,
+                expected_final_memory_value: 0xABCD,
+            },
+            // Test with negative offset (e.g., offset = -3)
+            TestCase {
+                name: "STI negative offset",
+                initial_pc: 0x3005,
+                src_reg: Register::R2,
+                offset: -3,
+                src_value: 0xFFFF,
+                intermediate_memory_value: 0x6000,
+                expected_final_memory_value: 0xFFFF,
+            },
+            // Edge case: wrap-around with PC high address.
+            TestCase {
+                name: "STI wrap-around PC",
+                initial_pc: 0xFFFF,
+                src_reg: Register::R3,
+                offset: 5, // Will wrap via wrapping_add
+                src_value: 0x3333,
+                intermediate_memory_value: 0x0002,
+                expected_final_memory_value: 0x3333,
+            },
+            // Test storing zero value.
+            TestCase {
+                name: "STI store zero",
+                initial_pc: 0x3000,
+                src_reg: Register::R4,
+                offset: 10,
+                src_value: 0,
+                intermediate_memory_value: 0x7000,
+                expected_final_memory_value: 0,
+            },
+        ];
+
+        for tc in test_cases {
+            let mut vm = Vm::new();
+            // Set the VM's PC according to the test case.
+            vm.registers[Register::PC] = tc.initial_pc;
+            // Place the value in the source register.
+            vm.registers[tc.src_reg as usize] = tc.src_value;
+            // Compute the intermediate address: (PC + sign-extended offset)
+            let intermediate_addr = tc.initial_pc.wrapping_add(tc.offset as u16);
+            // Write the intermediate memory value that holds the final target address.
+            vm.memory[intermediate_addr as usize] = tc.intermediate_memory_value;
+            // Make sure the final memory location is cleared (for clarity)
+            vm.memory[tc.intermediate_memory_value as usize] = 0;
+
+            // Construct the STI instruction:
+            // Format: 1011 SR PCoffset9
+            // Bits 15-12: 1011  (STI opcode)
+            // Bits 11-9: source register.
+            // Bits 8-0:   PCoffset9 (lower 9 bits of the offset, after sign extension on decoding)
+            let instruction =
+                (0b1011 << 12) | (((tc.src_reg as u16) & 0x7) << 9) | ((tc.offset as u16) & 0x1FF);
+
+            // Execute the STI instruction.
+            vm.execute_sti(instruction);
+
+            // Check that memory at the computed final address has the source value.
+            assert_eq!(
+                vm.memory[tc.intermediate_memory_value as usize], tc.expected_final_memory_value,
+                "Test case '{}' failed: memory[final_addr] mismatch",
+                tc.name,
+            );
+        }
+    }
+
+    #[test]
+    fn test_execute_str_reg() {
+        struct TestCase {
+            name: &'static str,
+            base_value: u16,    // Value in BaseR register.
+            sr_value: u16,      // Value in SR register.
+            offset: i16,        // Offset (6-bit signed value).
+            base_reg: Register, // Base register (the register whose content is used as base).
+            sr_reg: Register,   // SR register (the register whose content is stored).
+            expected_addr: u16, // Expected memory address (base_value + offset).
+        }
+
+        let test_cases = vec![
+            TestCase {
+                name: "Store with positive offset",
+                base_value: 0x3000,
+                sr_value: 1234,
+                offset: 5,
+                base_reg: Register::R2,
+                sr_reg: Register::R4,
+                expected_addr: 0x3000 + 5,
+            },
+            TestCase {
+                name: "Store with zero offset",
+                base_value: 0x4000,
+                sr_value: 0xABCD,
+                offset: 0,
+                base_reg: Register::R3,
+                sr_reg: Register::R5,
+                expected_addr: 0x4000,
+            },
+            TestCase {
+                name: "Store with negative offset",
+                base_value: 0x5000,
+                sr_value: 0x1234,
+                offset: -3,
+                base_reg: Register::R6,
+                sr_reg: Register::R7,
+                expected_addr: 0x5000u16.wrapping_add((-3i16) as u16),
+            },
+            TestCase {
+                name: "Store with wrap-around address",
+                base_value: 0xFFFE,
+                sr_value: 0x0F0F,
+                offset: 5, // This addition wraps around: 0xFFFE + 5 = 0x0003 (mod 2^16)
+                base_reg: Register::R0,
+                sr_reg: Register::R1,
+                expected_addr: 0xFFFEu16.wrapping_add(5),
+            },
+        ];
+
+        for tc in test_cases {
+            let mut vm = Vm::new();
+            // Setup the base register with the base value.
+            vm.registers[tc.base_reg as usize] = tc.base_value;
+            // Setup the source register with the value to be stored.
+            vm.registers[tc.sr_reg as usize] = tc.sr_value;
+
+            // Build the STR instruction.
+            // Encoding: 0111 (opcode) then bits[11:9] = SR, bits[8:6] = BaseR, and bits[5:0] = offset6.
+            let instr: u16 = (0b0111 << 12)
+                | ((tc.sr_reg as u16 & 0x7) << 9)
+                | ((tc.base_reg as u16 & 0x7) << 6)
+                | ((tc.offset as u16) & 0x3F);
+
+            // Execute the STORE register instruction.
+            vm.execute_str_reg(instr);
+
+            // Check that the memory at expected address is set to the SR value.
+            assert_eq!(
+                vm.memory[tc.expected_addr as usize], tc.sr_value,
+                "Failed test case '{}': Expected memory[0x{:04X}] to be 0x{:04X}",
+                tc.name, tc.expected_addr, tc.sr_value
             );
         }
     }
