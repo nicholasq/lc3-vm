@@ -181,6 +181,7 @@ impl Vm {
             Opcode::Not => self.execute_not(instr),
             Opcode::Br => self.execute_branch(instr),
             Opcode::Jmp => self.execute_jmp(instr),
+            Opcode::Jsr => self.execute_jsr(instr),
             _ => panic!("Unsupported opcode: {}", opcode),
         }
     }
@@ -252,6 +253,23 @@ impl Vm {
     fn execute_jmp(&mut self, instr: u16) {
         let base_reg = (instr >> 6) & 0x7;
         self.registers[Register::PC] = self.registers[base_reg as usize];
+    }
+
+    fn execute_jsr(&mut self, instr: u16) {
+        // Save current PC in R7 (link register)
+        self.registers[Register::R7] = self.registers[Register::PC];
+
+        // Check if using JSR (1) or JSRR (0) mode
+        if (instr >> 11) & 1 == 1 {
+            // JSR: PC-relative jump
+            let long_pc_offset = sign_extend(instr & 0x7FF, 11);
+            self.registers[Register::PC] =
+                self.registers[Register::PC].wrapping_add(long_pc_offset);
+        } else {
+            // JSRR: Register-based jump
+            let base_reg = (instr >> 6) & 0x7;
+            self.registers[Register::PC] = self.registers[base_reg as usize];
+        }
     }
 }
 
@@ -707,6 +725,121 @@ mod tests {
                 tc.name,
                 tc.expected_pc,
                 vm.registers[Register::PC]
+            );
+        }
+    }
+
+    #[test]
+    fn test_execute_jsr() {
+        struct TestCase {
+            name: &'static str,
+            initial_pc: u16,
+            instruction: u16,
+            base_reg: Option<(Register, u16)>, // For JSRR tests: (reg, value)
+            expected_pc: u16,
+            expected_r7: u16,
+        }
+
+        let test_cases = vec![
+            // JSR tests (PC-relative)
+            TestCase {
+                name: "JSR forward",
+                initial_pc: 0x3000,
+                instruction: 0b0100_1000_0000_1010, // JSR with positive offset (+10)
+                base_reg: None,
+                expected_pc: 0x300A,
+                expected_r7: 0x3000,
+            },
+            TestCase {
+                name: "JSR backward",
+                initial_pc: 0x3000,
+                instruction: 0b0100_1111_1111_1000, // JSR with negative offset (-8)
+                base_reg: None,
+                expected_pc: 0x2FF8,
+                expected_r7: 0x3000,
+            },
+            TestCase {
+                name: "JSR maximum positive offset",
+                initial_pc: 0x3000,
+                instruction: 0b0100_1011_1111_1111, // JSR with max positive offset
+                base_reg: None,
+                expected_pc: 0x33FF,
+                expected_r7: 0x3000,
+            },
+            TestCase {
+                name: "JSR maximum negative offset",
+                initial_pc: 0x3000,
+                instruction: 0b0100_1100_0000_0000, // JSR with max negative offset
+                base_reg: None,
+                expected_pc: 0x2C00,
+                expected_r7: 0x3000,
+            },
+            // JSRR tests (register-based)
+            TestCase {
+                name: "JSRR basic jump",
+                initial_pc: 0x3000,
+                instruction: 0b0100_0000_1000_0000, // JSRR R2
+                base_reg: Some((Register::R2, 0x4000)),
+                expected_pc: 0x4000,
+                expected_r7: 0x3000,
+            },
+            TestCase {
+                name: "JSRR jump to zero",
+                initial_pc: 0x3000,
+                instruction: 0b0100_0000_1100_0000, // JSRR R3
+                base_reg: Some((Register::R3, 0x0000)),
+                expected_pc: 0x0000,
+                expected_r7: 0x3000,
+            },
+            TestCase {
+                name: "JSRR jump to max address",
+                initial_pc: 0x3000,
+                instruction: 0b0100_0001_0000_0000, // JSRR R4
+                base_reg: Some((Register::R4, 0xFFFF)),
+                expected_pc: 0xFFFF,
+                expected_r7: 0x3000,
+            },
+            TestCase {
+                name: "JSRR jump to current location",
+                initial_pc: 0x3000,
+                instruction: 0b0100_0001_0100_0000, // JSRR R5
+                base_reg: Some((Register::R5, 0x3000)),
+                expected_pc: 0x3000,
+                expected_r7: 0x3000,
+            },
+        ];
+
+        for tc in test_cases {
+            let mut vm = Vm::new();
+
+            // Setup initial state
+            vm.registers[Register::PC] = tc.initial_pc;
+
+            // Setup base register for JSRR tests if specified
+            if let Some((reg, value)) = tc.base_reg {
+                vm.registers[reg as usize] = value;
+            }
+
+            // Execute the instruction
+            vm.execute_jsr(tc.instruction);
+
+            // Verify PC and R7 are correct
+            assert_eq!(
+                vm.registers[Register::PC],
+                tc.expected_pc,
+                "Failed test case '{}': PC mismatch. Expected 0x{:04X}, got 0x{:04X}",
+                tc.name,
+                tc.expected_pc,
+                vm.registers[Register::PC]
+            );
+
+            assert_eq!(
+                vm.registers[Register::R7],
+                tc.expected_r7,
+                "Failed test case '{}': R7 mismatch. Expected 0x{:04X}, got 0x{:04X}",
+                tc.name,
+                tc.expected_r7,
+                vm.registers[Register::R7]
             );
         }
     }
