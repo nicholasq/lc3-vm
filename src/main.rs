@@ -1,4 +1,7 @@
-use std::ops::{Index, IndexMut};
+use std::{
+    io::{self, Read},
+    ops::{Index, IndexMut},
+};
 
 /// The LC-3 has 10 registers, each 16 bits:
 /// - 8 general purpose registers (R0-R7)
@@ -130,6 +133,21 @@ enum ConditionFlag {
     Neg = 1 << 2,
 }
 
+enum TrapCode {
+    /// - Getc: Read a character from the keyboard
+    Getc = 0x20,
+    /// - Out: Write a character to the screen
+    Out = 0x21,
+    /// - Puts: Write a string to the screen
+    Puts = 0x22,
+    /// - In: Read a string from the keyboard
+    In = 0x23,
+    /// - Putsp: Write a string to the screen in hexadecimal
+    Putsp = 0x24,
+    /// - Halt: Halt the program
+    Halt = 0x25,
+}
+
 /// The maximum amount of memory supported by the VM (64K)
 const MEMORY_MAX: usize = 1 << 16;
 /// Starting address in memory where program execution begins (0x3000)
@@ -188,6 +206,7 @@ impl Vm {
             Opcode::St => self.execute_store(instr),
             Opcode::Sti => self.execute_sti(instr),
             Opcode::Str => self.execute_str_reg(instr),
+            Opcode::Trap => self.execute_trap(instr),
             _ => panic!("Unsupported opcode: {}", opcode),
         }
     }
@@ -349,6 +368,81 @@ impl Vm {
         let offset6 = sign_extend(instr & 0x3F, 6); // Sign-extend the 6-bit offset.
         let addr = self.registers[base_r as usize].wrapping_add(offset6);
         self.memory[addr as usize] = self.registers[sr as usize];
+    }
+
+    fn execute_trap(&mut self, instr: u16) {
+        // Save return address in R7.
+        self.registers[Register::R7] = self.registers[Register::PC];
+
+        // The trap vector is stored in the lower 8 bits.
+        let trap_vect = instr & 0xFF;
+
+        match trap_vect {
+            // TRAP GETC: Read a single ASCII character.
+            0x20 => {
+                // Blocking read exactly one byte.
+                let mut buf = [0u8; 1];
+                io::stdin()
+                    .read_exact(&mut buf)
+                    .expect("Failed to read a character");
+                self.registers[Register::R0] = buf[0] as u16;
+                update_flags(&mut self.registers, Register::R0 as u16);
+            }
+            // TRAP OUT: Write the character in R0 to stdout.
+            0x21 => {
+                let ch = self.registers[Register::R0] as u8 as char;
+                print!("{}", ch);
+            }
+            // TRAP PUTS: Write a null-terminated string from memory.
+            0x22 => {
+                // The starting address of the string is in R0.
+                let mut addr = self.registers[Register::R0];
+                while self.memory[addr as usize] != 0 {
+                    // Each word contains one ASCII character.
+                    let ch = self.memory[addr as usize] as u8 as char;
+                    print!("{}", ch);
+                    addr = addr.wrapping_add(1);
+                }
+            }
+            // TRAP IN: Prompt for a character, echo it, then store it in R0.
+            0x23 => {
+                print!("Enter a character: ");
+                let mut buffer = String::new();
+                io::stdin()
+                    .read_line(&mut buffer)
+                    .expect("Failed to read line");
+                // Use the first character of the input, or '\n' if nothing was entered.
+                let ch = buffer.chars().next().unwrap_or('\n');
+                print!("{}", ch);
+                self.registers[Register::R0] = ch as u16;
+                update_flags(&mut self.registers, Register::R0 as u16);
+            }
+            // TRAP PUTSP: Write out a string where each word contains two characters.
+            0x24 => {
+                let mut addr = self.registers[Register::R0];
+                while self.memory[addr as usize] != 0 {
+                    let word = self.memory[addr as usize];
+                    // Lower 8 bits is the first char.
+                    let char1 = (word & 0xFF) as u8 as char;
+                    print!("{}", char1);
+                    // Upper 8 bits is the second char, if nonzero.
+                    let char2 = (word >> 8) as u8;
+                    if char2 != 0 {
+                        print!("{}", char2 as char);
+                    }
+                    addr = addr.wrapping_add(1);
+                }
+            }
+            // TRAP HALT: Print HALT and exit the program.
+            0x25 => {
+                println!("HALT");
+                std::process::exit(0);
+            }
+            // Catch-all for unknown trap codes.
+            _ => {
+                panic!("Unknown trap code: 0x{:X}", trap_vect);
+            }
+        }
     }
 }
 
