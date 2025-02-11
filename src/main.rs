@@ -148,6 +148,27 @@ enum TrapCode {
     Halt = 0x25,
 }
 
+impl From<u16> for TrapCode {
+    fn from(value: u16) -> Self {
+        match value {
+            0x20 => TrapCode::Getc,
+            0x21 => TrapCode::Out,
+            0x22 => TrapCode::Puts,
+            0x23 => TrapCode::In,
+            0x24 => TrapCode::Putsp,
+            0x25 => TrapCode::Halt,
+            _ => panic!("invalid opcode"),
+        }
+    }
+}
+
+enum MemMapRegister {
+    /// - KBSR: Keyboard status register
+    Kbsr = 0xFE00,
+    /// - KBDR: Keyboard data register
+    Kbdr = 0xFE02,
+}
+
 /// The maximum amount of memory supported by the VM (64K)
 const MEMORY_MAX: usize = 1 << 16;
 /// Starting address in memory where program execution begins (0x3000)
@@ -184,9 +205,21 @@ impl Vm {
             if self.registers[Register::PC] > END_OF_USERSPACE {
                 break;
             }
-            let instr: u16 = self.memory[self.registers[Register::PC] as usize];
+            let instr: u16 = self.read_memory(self.registers[Register::PC]);
             self.registers[Register::PC] += 1;
             self.execute_instruction(instr);
+        }
+    }
+
+    fn read_memory(&self, addr: u16) -> u16 {
+        if addr == MemMapRegister::Kbsr as u16 {
+            // Always indicate that no key is ready.
+            0
+        } else if addr == MemMapRegister::Kbdr as u16 {
+            // Return 0 for keyboard data.
+            0
+        } else {
+            self.memory[addr as usize]
         }
     }
 
@@ -377,9 +410,9 @@ impl Vm {
         // The trap vector is stored in the lower 8 bits.
         let trap_vect = instr & 0xFF;
 
-        match trap_vect {
+        match TrapCode::from(trap_vect) {
             // TRAP GETC: Read a single ASCII character.
-            0x20 => {
+            TrapCode::Getc => {
                 // Blocking read exactly one byte.
                 let mut buf = [0u8; 1];
                 io::stdin()
@@ -389,12 +422,12 @@ impl Vm {
                 update_flags(&mut self.registers, Register::R0 as u16);
             }
             // TRAP OUT: Write the character in R0 to stdout.
-            0x21 => {
+            TrapCode::Out => {
                 let ch = self.registers[Register::R0] as u8 as char;
                 print!("{}", ch);
             }
             // TRAP PUTS: Write a null-terminated string from memory.
-            0x22 => {
+            TrapCode::Puts => {
                 // The starting address of the string is in R0.
                 let mut addr = self.registers[Register::R0];
                 while self.memory[addr as usize] != 0 {
@@ -405,7 +438,7 @@ impl Vm {
                 }
             }
             // TRAP IN: Prompt for a character, echo it, then store it in R0.
-            0x23 => {
+            TrapCode::In => {
                 print!("Enter a character: ");
                 let mut buffer = String::new();
                 io::stdin()
@@ -418,7 +451,7 @@ impl Vm {
                 update_flags(&mut self.registers, Register::R0 as u16);
             }
             // TRAP PUTSP: Write out a string where each word contains two characters.
-            0x24 => {
+            TrapCode::Putsp => {
                 let mut addr = self.registers[Register::R0];
                 while self.memory[addr as usize] != 0 {
                     let word = self.memory[addr as usize];
@@ -434,13 +467,9 @@ impl Vm {
                 }
             }
             // TRAP HALT: Print HALT and exit the program.
-            0x25 => {
+            TrapCode::Halt => {
                 println!("HALT");
                 std::process::exit(0);
-            }
-            // Catch-all for unknown trap codes.
-            _ => {
-                panic!("Unknown trap code: 0x{:X}", trap_vect);
             }
         }
     }
