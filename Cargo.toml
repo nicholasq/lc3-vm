@@ -4,3 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+libc = "0.2.169"
+nix = { version = "0.30.1", features = ["poll"] }
+signal-hook = "0.3.17"
+termios = "0.3.3"
